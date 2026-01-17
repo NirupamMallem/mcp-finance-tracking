@@ -3,28 +3,32 @@ import os
 import aiosqlite
 from pathlib import Path
 
-# -----------------------------
-# Persistent storage directory
-# -----------------------------
-DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(__file__))
+# -------------------------------------------------
+# Cloud-safe persistent directory (FastMCP Cloud)
+# -------------------------------------------------
+DATA_DIR = "/data"
 Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, "expenses.db")
 CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "categories.json")
 
-print(f"[REMOTE] Database path: {DB_PATH}")
+print(f"[BOOT] Database path: {DB_PATH}")
 
 mcp = FastMCP("ExpenseTracker")
 
-# -----------------------------
-# Database initialization
-# -----------------------------
+# -------------------------------------------------
+# ZERO-COST DB INIT (cloud-safe)
+# -------------------------------------------------
 def init_db():
     import sqlite3
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute("PRAGMA journal_mode=WAL")
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS expenses(
+
+    # IMPORTANT:
+    # - No WAL
+    # - No inserts
+    # - No deletes
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS expenses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
                 amount REAL NOT NULL,
@@ -33,15 +37,19 @@ def init_db():
                 note TEXT DEFAULT ''
             )
         """)
-        c.commit()
-        count = c.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
-        print(f"[REMOTE] DB ready. Rows: {count}")
+        conn.commit()
+
+        count = conn.execute(
+            "SELECT COUNT(*) FROM expenses"
+        ).fetchone()[0]
+
+    print(f"[BOOT] DB ready. Existing rows: {count}")
 
 init_db()
 
-# -----------------------------
+# -------------------------------------------------
 # TOOLS
-# -----------------------------
+# -------------------------------------------------
 @mcp.tool()
 async def add_expense(
     date: str,
@@ -50,35 +58,42 @@ async def add_expense(
     subcategory: str = "",
     note: str = ""
 ):
-    async with aiosqlite.connect(DB_PATH) as c:
-        cur = await c.execute(
-            "INSERT INTO expenses(date, amount, category, subcategory, note) VALUES (?,?,?,?,?)",
-            (date, amount, category, subcategory, note)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT INTO expenses (date, amount, category, subcategory, note)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (date, amount, category, subcategory, note),
         )
-        await c.commit()
+        await db.commit()
         return {
             "status": "success",
             "id": cur.lastrowid,
-            "message": "Expense added successfully"
+            "message": "Expense added successfully",
         }
 
 @mcp.tool()
 async def list_expenses(start_date: str, end_date: str):
-    async with aiosqlite.connect(DB_PATH) as c:
-        cur = await c.execute("""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
             SELECT id, date, amount, category, subcategory, note
             FROM expenses
             WHERE date BETWEEN ? AND ?
             ORDER BY date DESC, id DESC
-        """, (start_date, end_date))
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in await cur.fetchall()]
+            """,
+            (start_date, end_date),
+        )
+        cols = [c[0] for c in cur.description]
+        rows = await cur.fetchall()
+        return [dict(zip(cols, r)) for r in rows]
 
 @mcp.tool()
 async def summarize(start_date: str, end_date: str, category: str = None):
-    async with aiosqlite.connect(DB_PATH) as c:
+    async with aiosqlite.connect(DB_PATH) as db:
         query = """
-            SELECT category, SUM(amount) AS total_amount, COUNT(*) as count
+            SELECT category, SUM(amount) AS total_amount, COUNT(*) AS count
             FROM expenses
             WHERE date BETWEEN ? AND ?
         """
@@ -90,40 +105,55 @@ async def summarize(start_date: str, end_date: str, category: str = None):
 
         query += " GROUP BY category ORDER BY total_amount DESC"
 
-        cur = await c.execute(query, params)
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in await cur.fetchall()]
+        cur = await db.execute(query, params)
+        cols = [c[0] for c in cur.description]
+        rows = await cur.fetchall()
+        return [dict(zip(cols, r)) for r in rows]
 
 @mcp.tool()
 async def debug_db_info():
-    async with aiosqlite.connect(DB_PATH) as c:
-        count = (await (await c.execute("SELECT COUNT(*) FROM expenses")).fetchone())[0]
-        return {
-            "db_path": DB_PATH,
-            "total_rows": count,
-            "exists": os.path.exists(DB_PATH)
-        }
+    async with aiosqlite.connect(DB_PATH) as db:
+        count = (
+            await (await db.execute("SELECT COUNT(*) FROM expenses")).fetchone()
+        )[0]
 
-# -----------------------------
-# Resource
-# -----------------------------
+    return {
+        "db_path": DB_PATH,
+        "exists": os.path.exists(DB_PATH),
+        "total_rows": count,
+    }
+
+# -------------------------------------------------
+# RESOURCE
+# -------------------------------------------------
 @mcp.resource("expense:///categories", mime_type="application/json")
 def categories():
     import json
+
     if os.path.exists(CATEGORIES_PATH):
-        return open(CATEGORIES_PATH, "r", encoding="utf-8").read()
+        with open(CATEGORIES_PATH, "r", encoding="utf-8") as f:
+            return f.read()
 
-    return json.dumps({
-        "categories": [
-            "Food & Dining", "Transportation", "Shopping",
-            "Entertainment", "Bills & Utilities",
-            "Healthcare", "Travel", "Education",
-            "Business", "Other"
-        ]
-    }, indent=2)
+    return json.dumps(
+        {
+            "categories": [
+                "Food & Dining",
+                "Transportation",
+                "Shopping",
+                "Entertainment",
+                "Bills & Utilities",
+                "Healthcare",
+                "Travel",
+                "Education",
+                "Business",
+                "Other",
+            ]
+        },
+        indent=2,
+    )
 
-# -----------------------------
-# Start server
-# -----------------------------
+# -------------------------------------------------
+# START SERVER
+# -------------------------------------------------
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)
