@@ -4,7 +4,7 @@ import aiosqlite
 from pathlib import Path
 
 # -------------------------------------------------
-# Cloud-safe persistent directory (FastMCP Cloud)
+# Cloud-safe persistent directory
 # -------------------------------------------------
 DATA_DIR = "/data"
 Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
@@ -12,20 +12,26 @@ Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "expenses.db")
 CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "categories.json")
 
-print(f"[BOOT] Database path: {DB_PATH}")
+print(f"[BOOT] Server loaded. DB will be at: {DB_PATH}")
 
 mcp = FastMCP("ExpenseTracker")
 
 # -------------------------------------------------
-# ZERO-COST DB INIT (cloud-safe)
+# LAZY DB INITIALIZATION (CRITICAL FIX)
 # -------------------------------------------------
-def init_db():
-    import sqlite3
+_db_initialized = False
 
-    # IMPORTANT:
-    # - No WAL
-    # - No inserts
-    # - No deletes
+async def ensure_db():
+    """
+    Lazy, zero-cost init:
+    - Runs only on first tool call
+    - Never blocks server startup
+    """
+    global _db_initialized
+    if _db_initialized:
+        return
+
+    import sqlite3
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS expenses (
@@ -39,13 +45,8 @@ def init_db():
         """)
         conn.commit()
 
-        count = conn.execute(
-            "SELECT COUNT(*) FROM expenses"
-        ).fetchone()[0]
-
-    print(f"[BOOT] DB ready. Existing rows: {count}")
-
-init_db()
+    _db_initialized = True
+    print("[DB] Initialized successfully")
 
 # -------------------------------------------------
 # TOOLS
@@ -58,6 +59,8 @@ async def add_expense(
     subcategory: str = "",
     note: str = ""
 ):
+    await ensure_db()
+
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """
@@ -67,6 +70,7 @@ async def add_expense(
             (date, amount, category, subcategory, note),
         )
         await db.commit()
+
         return {
             "status": "success",
             "id": cur.lastrowid,
@@ -75,6 +79,8 @@ async def add_expense(
 
 @mcp.tool()
 async def list_expenses(start_date: str, end_date: str):
+    await ensure_db()
+
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """
@@ -91,6 +97,8 @@ async def list_expenses(start_date: str, end_date: str):
 
 @mcp.tool()
 async def summarize(start_date: str, end_date: str, category: str = None):
+    await ensure_db()
+
     async with aiosqlite.connect(DB_PATH) as db:
         query = """
             SELECT category, SUM(amount) AS total_amount, COUNT(*) AS count
@@ -112,6 +120,8 @@ async def summarize(start_date: str, end_date: str, category: str = None):
 
 @mcp.tool()
 async def debug_db_info():
+    await ensure_db()
+
     async with aiosqlite.connect(DB_PATH) as db:
         count = (
             await (await db.execute("SELECT COUNT(*) FROM expenses")).fetchone()
