@@ -98,6 +98,35 @@ async def add_expense(date: str, amount: float, category: str, subcategory: str 
             return {"status": "error", "message": "Database is in read-only mode. Check file permissions."}
         return {"status": "error", "message": f"Database error: {str(e)}"}
 
+@mcp.tool()
+async def debug_db_info() -> dict:
+    '''Get database information and row count'''
+    try:
+        async with aiosqlite.connect(DB_PATH) as c:
+            # Get total count
+            cur = await c.execute("SELECT COUNT(*) FROM expenses")
+            count = (await cur.fetchone())[0]
+            
+            # Get all rows (limited to 100)
+            cur = await c.execute("SELECT * FROM expenses ORDER BY id DESC LIMIT 100")
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in await cur.fetchall()]
+            
+            # Get database file info
+            import os
+            db_exists = os.path.exists(DB_PATH)
+            db_size = os.path.getsize(DB_PATH) if db_exists else 0
+            
+            return {
+                "db_path": DB_PATH,
+                "db_exists": db_exists,
+                "db_size_bytes": db_size,
+                "total_rows": count,
+                "recent_rows": rows
+            }
+    except Exception as e:
+        return {"status": "error", "message": f"Debug error: {str(e)}"}
+    
 @mcp.resource("expense:///categories", mime_type="application/json")  # Changed: expense:// → expense:///
 def categories():
     try:
